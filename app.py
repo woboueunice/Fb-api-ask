@@ -1,9 +1,9 @@
 from flask import Flask, request, jsonify
 import google.generativeai as genai
 import os
+import requests
+import json
 import base64
-from io import BytesIO
-from PIL import Image
 
 app = Flask(__name__)
 
@@ -15,74 +15,88 @@ if api_key:
 
 @app.route('/')
 def home():
-    return "🚀 L'API KJM AI (Version 2.5) est en ligne !"
+    return "🚀 L'API KJM AI ( Version 2.5 ) est en ligne !✅"
 
-# --- ENDPOINT 1 : CHAT (Texte) ---
+# --- ENDPOINT 1 : CHAT (Texte - Multi-modèles) ---
 @app.route('/chat', methods=['GET', 'POST'])
 def chat():
     user_message = request.args.get('message') or request.json.get('message')
     
-    if not user_message:
-        return jsonify({"error": "Message manquant"}), 400
+    if not user_message: return jsonify({"error": "Message manquant"}), 400
 
-    try:
-        # CORRECTION ICI : On utilise le modèle présent dans ta liste debug
-        # 'gemini-2.5-flash' est très rapide et puissant
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        
-        response = model.generate_content(user_message)
-        
-        return jsonify({
-            "status": "success",
-            "type": "text",
-            "model_used": "gemini-2.5-flash",
-            "reponse": response.text
-        })
-    except Exception as e:
-        return jsonify({
-            "error": "Erreur de génération texte",
-            "details": str(e)
-        }), 500
+    # LISTE DES MODÈLES À TESTER (Du meilleur au secours)
+    # 1. Le Lite (Rapide, gratuit, gros quota)
+    # 2. Le Flash Exp (Puissant, bon quota)
+    models_to_try = [
+        'gemini-2.0-flash-lite-preview-02-05',
+        'gemini-2.0-flash-exp'
+    ]
 
-# --- ENDPOINT 2 : IMAGE ---
+    last_error = ""
+
+    for model_name in models_to_try:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(user_message)
+            
+            return jsonify({
+                "status": "success",
+                "type": "text",
+                "model_used": model_name,
+                "reponse": response.text
+            })
+        except Exception as e:
+            # Si un modèle échoue (quota ou erreur), on passe au suivant dans la boucle
+            last_error = str(e)
+            continue
+    
+    # Si on arrive ici, c'est que TOUS les modèles ont échoué
+    return jsonify({
+        "error": "Tous les modèles sont occupés ou hors quota.", 
+        "details": last_error
+    }), 429
+
+# --- ENDPOINT 2 : IMAGE (Connexion Directe HTTP) ---
 @app.route('/image', methods=['GET', 'POST'])
 def generate_image():
     prompt = request.args.get('prompt') or request.json.get('prompt')
-    
-    if not prompt:
-        return jsonify({"error": "Description (prompt) manquante"}), 400
+    if not prompt: return jsonify({"error": "Prompt manquant"}), 400
+    if not api_key: return jsonify({"error": "Clé API manquante"}), 500
 
     try:
-        # On tente d'utiliser Imagen 3 (standard Google)
-        # Si cela échoue car ton compte n'a pas accès à Imagen, 
-        # le message d'erreur nous le dira.
-        imagen_model = genai.ImageGenerationModel("imagen-3.0-generate-001")
+        # On appelle directement l'API Web de Google (contourne le bug de la librairie Render)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict?key={api_key}"
         
-        results = imagen_model.generate_images(
-            prompt=prompt,
-            number_of_images=1,
-            aspect_ratio="1:1",
-            safety_filter_level="block_only_high",
-            person_generation="allow_adult"
-        )
+        payload = {
+            "instances": [{"prompt": prompt}],
+            "parameters": {
+                "sampleCount": 1,
+                "aspectRatio": "1:1",
+                "personGeneration": "allow_adult"
+            }
+        }
+        
+        # Envoi de la requête
+        response = requests.post(url, headers={'Content-Type': 'application/json'}, data=json.dumps(payload))
+        
+        if response.status_code != 200:
+            return jsonify({"error": "Erreur Google Image", "code": response.status_code, "msg": response.text})
 
-        for image in results:
-            img_byte_arr = BytesIO()
-            image._pil_image.save(img_byte_arr, format='JPEG')
-            img_byte_arr = img_byte_arr.getvalue()
-            base64_data = base64.b64encode(img_byte_arr).decode('utf-8')
-            
+        result = response.json()
+        
+        # Extraction de l'image
+        if 'predictions' in result and result['predictions']:
+            base64_data = result['predictions'][0]['bytesBase64Encoded']
             return jsonify({
                 "status": "success",
                 "type": "image_base64",
                 "data": base64_data
             })
+        else:
+            return jsonify({"error": "Pas d'image générée", "debug": result})
 
     except Exception as e:
-        return jsonify({
-            "error": "Erreur image. Essayez un modèle différent ou vérifiez l'accès Imagen.",
-            "details": str(e)
-        }), 500
+        return jsonify({"error": "Erreur système", "details": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
